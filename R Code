@@ -1,0 +1,215 @@
+# -------------------- setup --------------------
+pkgs <- c("tidyverse","tidyquant","lubridate","glmnet","broom","kableExtra","scales")
+invisible(lapply(setdiff(pkgs, rownames(installed.packages())), install.packages))
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+# -------------------- portfolio weights from shares --------------------
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(scales)
+library(kableExtra)
+
+#Replace Ticker as needed
+tickers <- c("AAPL","AMZN","ARM","ASML","BA","BAC","BRK-B","BTF","BX","BYDDY","DB","DHIL",
+             "ELV","ESGV","FIG","FIGS","HON","IWC","KR","LULU","MS","MSFT","NVDA","PG",
+             "PLTR","RIVN","RKT","RGTI","VNQ","VOO","VUG","WFC","WM","XLV","SPHY","TLT",
+             "UNH","XMPT")
+
+#Corrected shares as needed
+shares <- c(1.51, 1.4, 1.5, 0.082, 0.290, 3.42, 0.1936, 3.83, 0.5282, 6, 6.42, 0.3793, 
+            0.4882, 2.52, 1, 4.78, 0.1953, 1.04, 1.76, 0.3689, 1.83, 0.3921, 3.02, 0.8311, 
+            0.4710, 2, 2.12, 11.19, 1.56, 1.75, 1.29, 5.09, 0.34735, 0.8036, 6.65, 1.38, 
+            0.2737, 6.97)
+
+stopifnot(length(tickers) == length(shares))
+holdings <- tibble(symbol = tickers, shares = shares)
+
+# ---------- download prices ----------
+start_date <- as.Date("2016-01-01")
+end_date   <- Sys.Date()
+
+safe_get <- function(sym) {
+  tryCatch(
+    tq_get(sym, from = start_date, to = end_date, get = "stock.prices") |> mutate(symbol = sym),
+    error = function(e) tibble()
+  )
+}
+
+prices <- map_df(tickers, safe_get) |> distinct(symbol, date, .keep_all = TRUE)
+
+miss_syms <- setdiff(tickers, unique(prices$symbol))
+if (length(miss_syms)) message("No price history for: ", paste(miss_syms, collapse = ", "))
+
+# ---------- single common valuation date for weights ----------
+val_date <- prices |>
+  group_by(symbol) |>
+  summarise(last_date = max(date), .groups = "drop") |>
+  summarise(val_date = min(last_date)) |>
+  pull(val_date)
+
+weights_tbl <- prices |>
+  filter(date == val_date) |>
+  select(symbol, date, adjusted) |>
+  inner_join(holdings, by = "symbol") |>
+  mutate(position_value = adjusted * shares,
+         weight = position_value / sum(position_value)) |>
+  arrange(desc(weight)) |>
+  select(symbol, date, shares, price = adjusted, position_value, weight)
+
+# Pretty "as-of" weights table
+knitr::kable(
+  weights_tbl |>
+    mutate(position_value = dollar(position_value),
+           price = dollar(price),
+           weight = percent(weight, accuracy = 0.01)),
+  caption = paste0("As-of Weights on ", val_date)
+) |> kable_classic()
+
+# ---------- buy-and-hold portfolio value and monthly returns ----------
+port_val_daily <- prices |>
+  inner_join(holdings, by = "symbol") |>
+  mutate(pos_val = adjusted * shares) |>
+  group_by(date) |>
+  summarise(port_value = sum(pos_val, na.rm = TRUE), .groups = "drop") |>
+  arrange(date)
+
+# Monthly log returns of the portfolio value
+ret_m <- port_val_daily |>
+  tq_transmute(
+    select = port_value, mutate_fun = periodReturn,
+    period = "monthly", type = "log", col_rename = "port_ret"
+  )
+# -------------------- factor proxies --------------------
+# Macro factors
+#   Equity (global): ACWI
+#   Interest Rates (duration): IEF
+#   Credit: HYG - IEF
+#   Commodities: DBC
+#   EM vs DM: EEM - ACWI
+#   USD (FX): UUP
+#   Local Inflation: TIP - IEF
+#   US vs World (home bias): SPY - ACWI
+
+# Equity styles (long – market-neutral spreads to approximate style portfolios)
+#   Value:   VLUE - ACWI
+#   Quality: QUAL - ACWI
+#   Momentum: MTUM - ACWI
+#   Low Risk: SPLV - SPY
+#   Size:     IJR  - SPY
+
+# Macro style
+#   Trend Following: DBMF
+
+factor_syms <- c("ACWI","IEF","HYG","DBC","EEM","UUP","TIP","SPY","VLUE","QUAL","MTUM","SPLV","IJR","DBMF")
+
+fpx <- map_df(factor_syms, safe_get) %>%
+  group_by(symbol) %>%
+  tq_transmute(select = adjusted, mutate_fun = periodReturn,
+               period = "monthly", type = "log", col_rename = "ret") %>%
+  pivot_wider(names_from = symbol, values_from = ret)
+
+# Build factor panel
+factors <- fpx %>%
+  transmute(
+    date,
+    EQ_Global      = ACWI,                       # equity beta (global)
+    Rates          = IEF,                        # duration exposure
+    Credit         = HYG - IEF,                  # credit spread
+    Commodities    = DBC,
+    EM_vs_DM       = EEM - ACWI,
+    USD            = UUP,                        # USD up
+    LocalInflation = TIP - IEF,                  # breakeven proxy
+    US_vs_World    = SPY - ACWI,
+    
+    Value          = VLUE - ACWI,
+    Quality        = QUAL - ACWI,
+    Momentum       = MTUM - ACWI,
+    LowRisk        = SPLV - SPY,
+    Size           = IJR  - SPY,
+    
+    Trend          = DBMF
+  )
+
+# Align with portfolio
+df <- inner_join(ret_m, factors, by = "date") %>% drop_na()
+
+# -------------------- model: LASSO -> OLS --------------------
+X <- as.matrix(df %>% select(-date, -port_ret))
+y <- df$port_ret
+
+set.seed(42)
+cv  <- cv.glmnet(X, y, alpha = 1, nfolds = 10, standardize = TRUE)
+lam <- cv$lambda.1se  # parsimonious choice
+
+coef_sel <- coef(cv, s = lam)
+keep_idx <- which(coef_sel[-1,1] != 0)      # exclude intercept
+keep_factors <- colnames(X)[keep_idx]
+
+# Fallback: if nothing selected, keep Equity and Rates at least
+if(length(keep_factors) == 0) keep_factors <- c("EQ_Global","Rates")
+
+form <- reformulate(keep_factors, response = "port_ret")
+fit  <- lm(form, data = df)
+
+# -------------------- risk decomposition --------------------
+# Covariance of factor returns (monthly)
+Sigma <- cov(df[, keep_factors, drop = FALSE])
+
+b <- coef(fit)[keep_factors]                 # betas
+resid_var <- var(residuals(fit))
+fact_var  <- as.numeric(t(b) %*% Sigma %*% b)
+tot_var   <- fact_var + resid_var
+
+# Risk contributions per factor: b_i * (Σ b)_i
+rc_vec <- as.numeric(b * as.vector(Sigma %*% b))
+rc_tbl <- tibble(Factor = keep_factors,
+                 RiskContribution = rc_vec,
+                 PctOfTotalRisk = rc_vec / tot_var) %>%
+  arrange(desc(PctOfTotalRisk))
+
+# Exposures with t-stats
+tidy_fit <- broom::tidy(fit) %>%
+  filter(term != "(Intercept)") %>%
+  transmute(Factor = term, Beta = estimate, `t` = statistic) %>%
+  arrange(desc(abs(Beta)))
+
+# Model stats (annualized alpha & idio vol)
+alpha_m <- coef(fit)[["(Intercept)"]] %||% 0
+alpha_a <- (1 + alpha_m)^12 - 1
+idio_vol_a <- sqrt(resid_var) * sqrt(12)
+r2 <- summary(fit)$r.squared
+adjr2 <- summary(fit)$adj.r.squared
+
+stats_tbl <- tibble(
+  Metric = c("Annualized alpha","Idiosyncratic vol","R-squared","Adj. R-squared"),
+  Value  = c(scales::percent(alpha_a, accuracy = 0.01),
+             scales::percent(idio_vol_a, accuracy = 0.01),
+             scales::percent(r2, accuracy = 0.1),
+             scales::percent(adjr2, accuracy = 0.1))
+)
+
+# Pretty tables
+exposures_tbl <- tidy_fit %>%
+  mutate(Beta = round(Beta, 3), `t` = round(`t`, 2))
+
+risk_tbl <- rc_tbl %>%
+  mutate(PctOfTotalRisk = scales::percent(PctOfTotalRisk, accuracy = 0.1),
+         RiskContribution = round(RiskContribution, 6))
+
+# Print
+knitr::kable(exposures_tbl, caption = "Selected Factor Exposures (Betas) with t-stats") %>%
+  kableExtra::kable_classic()
+knitr::kable(risk_tbl, caption = "Risk Contribution by Factor (% of total variance)") %>%
+  kableExtra::kable_classic()
+knitr::kable(stats_tbl, caption = "Model Diagnostics") %>%
+  kableExtra::kable_classic()
+
+print(risk_tbl)
+print(exposures_tbl)
+print(stats_tbl)
+
+# Optional: save CSVs
+# write_csv(exposures_tbl, "factor_exposures.csv")
+# write_csv(risk_tbl,      "risk_contributions.csv")
+# write_csv(stats_tbl,     "model_stats.csv")
