@@ -1,26 +1,24 @@
 # -------------------- setup --------------------
+if (is.na(getOption("repos")["CRAN"]) || getOption("repos")["CRAN"] == "@CRAN@") {
+  options(repos = c(CRAN = "https://cloud.r-project.org"))
+}
 pkgs <- c("tidyverse","tidyquant","lubridate","glmnet","broom","kableExtra","scales")
 invisible(lapply(setdiff(pkgs, rownames(installed.packages())), install.packages))
 invisible(lapply(pkgs, library, character.only = TRUE))
 
 # -------------------- portfolio weights from shares --------------------
-library(tidyverse)
-library(tidyquant)
-library(lubridate)
-library(scales)
-library(kableExtra)
 
 #Replace Ticker as needed
-tickers <- c("AAPL","AMZN","ARM","ASML","BA","BAC","BRK-B","BTF","BX","BYDDY","DB","DHIL",
-             "ELV","ESGV","FIG","FIGS","HON","IWC","KR","LULU","MS","MSFT","NVDA","PG",
-             "PLTR","RIVN","RKT","RGTI","VNQ","VOO","VUG","WFC","WM","XLV","SPHY","TLT",
-             "UNH","XMPT")
+tickers <- c("AAPL","AMZN","ARM","ASML","BA","BAC","BRK-B","CINF","DB",
+             "ELV","FIG","HON","IWC","KR","MEDP","MDLN","MS","MSFT","MURGY","NVDA","PG",
+             "RIVN","RKT","RGTI","CTAP","VNQ","VOO","VUG","WFC","WM","UNH","OMFL","SGOL",
+             "SPHY","TLT","GOVT","XMPT")
 
 #Corrected shares as needed
-shares <- c(1.51, 1.4, 1.5, 0.082, 0.290, 3.42, 0.1936, 3.83, 0.5282, 6, 6.42, 0.3793, 
-            0.4882, 2.52, 1, 4.78, 0.1953, 1.04, 1.76, 0.3689, 1.83, 0.3921, 3.02, 0.8311, 
-            0.4710, 2, 2.12, 11.19, 1.56, 1.75, 1.29, 5.09, 0.34735, 0.8036, 6.65, 1.38, 
-            0.2737, 6.97)
+shares <- c(1.52, 1.62, 1.5, 0.31319, 1.11, 3.91, 0.23602, 0.319013, 7.33, 
+            0.205593, 1.33, 0.588021, 1.04, 2.55, 0.707958, 3.67, 1.14, 0.451140, 9, 2.81, 1.18, 
+            2, 3.23, 9.3, 7.05, 1.82, 1.51, 7.76, 4.72, 0.629596, 0.774183, 3.12, 5.47, 
+            15.88, 4.24, 9.66, 9.24)
 
 stopifnot(length(tickers) == length(shares))
 holdings <- tibble(symbol = tickers, shares = shares)
@@ -67,8 +65,23 @@ knitr::kable(
 ) |> kable_classic()
 
 # ---------- buy-and-hold portfolio value and monthly returns ----------
+# Find the latest "inception" date among held tickers so the value series
+# never silently adds a new position mid-stream (which would fake a jump
+# in portfolio value / return when a recently-IPO'd ticker's history begins).
+inception_tbl <- prices |>
+  inner_join(holdings, by = "symbol") |>
+  group_by(symbol) |>
+  summarise(first_date = min(date), .groups = "drop") |>
+  arrange(desc(first_date))
+
+common_start <- max(inception_tbl$first_date)
+limiting_syms <- inception_tbl |> filter(first_date == common_start) |> pull(symbol)
+message("Backtest start constrained to ", common_start,
+        " by: ", paste(limiting_syms, collapse = ", "))
+
 port_val_daily <- prices |>
   inner_join(holdings, by = "symbol") |>
+  filter(date >= common_start) |>
   mutate(pos_val = adjusted * shares) |>
   group_by(date) |>
   summarise(port_value = sum(pos_val, na.rm = TRUE), .groups = "drop") |>
@@ -132,7 +145,21 @@ factors <- fpx %>%
   )
 
 # Align with portfolio
-df <- inner_join(ret_m, factors, by = "date") %>% drop_na()
+df_full <- inner_join(ret_m, factors, by = "date")
+df <- df_full %>% drop_na()
+
+if (nrow(df) < nrow(df_full)) {
+  na_cols <- df_full %>%
+    select(-date) %>%
+    summarise(across(everything(), ~ any(is.na(.)))) %>%
+    select(where(isTRUE)) %>%
+    names()
+  message(sprintf(
+    "drop_na() removed %d of %d months (kept %s to %s) due to missing data in: %s",
+    nrow(df_full) - nrow(df), nrow(df_full),
+    min(df$date), max(df$date), paste(na_cols, collapse = ", ")
+  ))
+}
 
 # -------------------- model: LASSO -> OLS --------------------
 X <- as.matrix(df %>% select(-date, -port_ret))
@@ -175,7 +202,7 @@ tidy_fit <- broom::tidy(fit) %>%
   arrange(desc(abs(Beta)))
 
 # Model stats (annualized alpha & idio vol)
-alpha_m <- coef(fit)[["(Intercept)"]] %||% 0
+alpha_m <- coef(fit)[["(Intercept)"]]
 alpha_a <- (1 + alpha_m)^12 - 1
 idio_vol_a <- sqrt(resid_var) * sqrt(12)
 r2 <- summary(fit)$r.squared
