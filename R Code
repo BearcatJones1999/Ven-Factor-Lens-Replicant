@@ -1,30 +1,32 @@
 # -------------------- setup --------------------
-if (is.na(getOption("repos")["CRAN"]) || getOption("repos")["CRAN"] == "@CRAN@") {
-  options(repos = c(CRAN = "https://cloud.r-project.org"))
-}
 pkgs <- c("tidyverse","tidyquant","lubridate","glmnet","broom","kableExtra","scales")
 invisible(lapply(setdiff(pkgs, rownames(installed.packages())), install.packages))
 invisible(lapply(pkgs, library, character.only = TRUE))
 
 # -------------------- portfolio weights from shares --------------------
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(scales)
+library(kableExtra)
 
 #Replace Ticker as needed
-tickers <- c("AAPL","AMZN","ARM","ASML","BA","BAC","BRK-B","CINF","DB",
-             "ELV","FIG","HON","IWC","KR","MEDP","MDLN","MS","MSFT","MURGY","NVDA","PG",
-             "RIVN","RKT","RGTI","CTAP","VNQ","VOO","VUG","WFC","WM","UNH","OMFL","SGOL",
-             "SPHY","TLT","GOVT","XMPT")
-
+tickers <- c("AAPL","AMZN","ARM","ASML","BA","BAC","BRK-B","CINF","DB", "HON", "HONA",
+             "KR","ELV","MS","MSFT", "MDLN", "MURGY", "MEDP", "NVDA","PG", "QBTS",
+             "RIVN","RKT","RGTI", "WFC","WM", "UNH", "CTAP","FEZ","OMFL", "IWC", "VNQ","VOO","VUG", 
+             "SGOL","SPHY","TLT","GOVT", "XMPT")
+length(tickers)
 #Corrected shares as needed
-shares <- c(1.52, 1.62, 1.5, 0.31319, 1.11, 3.91, 0.23602, 0.319013, 7.33, 
-            0.205593, 1.33, 0.588021, 1.04, 2.55, 0.707958, 3.67, 1.14, 0.451140, 9, 2.81, 1.18, 
-            2, 3.23, 9.3, 7.05, 1.82, 1.51, 7.76, 4.72, 0.629596, 0.774183, 3.12, 5.47, 
-            15.88, 4.24, 9.66, 9.24)
-
+shares <- c(1.20, 1.24, 0.92593, 0.216295, 1.35, 3.93, 0.419728, 0.886467, 7.33, 0.294943, 1.29, 
+            3.17, 0.273841, 1.14, 0.451977, 4.57, 9.00, 0.707958, 1.69, 1.20, 5.03, 
+            2.00, 3.23, 11.58, 4.75, 0.798870, 0.86489, 7.21, 2.97, 5.96, 1.05, 2.18, 1.37, 7.78, 
+            5.47, 18.50, 4.31, 12.02, 9.43)
+length(shares)
 stopifnot(length(tickers) == length(shares))
 holdings <- tibble(symbol = tickers, shares = shares)
 
 # ---------- download prices ----------
-start_date <- as.Date("2016-01-01")
+start_date <- as.Date("2020-01-01")
 end_date   <- Sys.Date()
 
 safe_get <- function(sym) {
@@ -65,23 +67,8 @@ knitr::kable(
 ) |> kable_classic()
 
 # ---------- buy-and-hold portfolio value and monthly returns ----------
-# Find the latest "inception" date among held tickers so the value series
-# never silently adds a new position mid-stream (which would fake a jump
-# in portfolio value / return when a recently-IPO'd ticker's history begins).
-inception_tbl <- prices |>
-  inner_join(holdings, by = "symbol") |>
-  group_by(symbol) |>
-  summarise(first_date = min(date), .groups = "drop") |>
-  arrange(desc(first_date))
-
-common_start <- max(inception_tbl$first_date)
-limiting_syms <- inception_tbl |> filter(first_date == common_start) |> pull(symbol)
-message("Backtest start constrained to ", common_start,
-        " by: ", paste(limiting_syms, collapse = ", "))
-
 port_val_daily <- prices |>
   inner_join(holdings, by = "symbol") |>
-  filter(date >= common_start) |>
   mutate(pos_val = adjusted * shares) |>
   group_by(date) |>
   summarise(port_value = sum(pos_val, na.rm = TRUE), .groups = "drop") |>
@@ -145,21 +132,7 @@ factors <- fpx %>%
   )
 
 # Align with portfolio
-df_full <- inner_join(ret_m, factors, by = "date")
-df <- df_full %>% drop_na()
-
-if (nrow(df) < nrow(df_full)) {
-  na_cols <- df_full %>%
-    select(-date) %>%
-    summarise(across(everything(), ~ any(is.na(.)))) %>%
-    select(where(isTRUE)) %>%
-    names()
-  message(sprintf(
-    "drop_na() removed %d of %d months (kept %s to %s) due to missing data in: %s",
-    nrow(df_full) - nrow(df), nrow(df_full),
-    min(df$date), max(df$date), paste(na_cols, collapse = ", ")
-  ))
-}
+df <- inner_join(ret_m, factors, by = "date") %>% drop_na()
 
 # -------------------- model: LASSO -> OLS --------------------
 X <- as.matrix(df %>% select(-date, -port_ret))
@@ -202,7 +175,7 @@ tidy_fit <- broom::tidy(fit) %>%
   arrange(desc(abs(Beta)))
 
 # Model stats (annualized alpha & idio vol)
-alpha_m <- coef(fit)[["(Intercept)"]]
+alpha_m <- coef(fit)[["(Intercept)"]] %||% 0
 alpha_a <- (1 + alpha_m)^12 - 1
 idio_vol_a <- sqrt(resid_var) * sqrt(12)
 r2 <- summary(fit)$r.squared
@@ -240,3 +213,158 @@ print(stats_tbl)
 # write_csv(exposures_tbl, "factor_exposures.csv")
 # write_csv(risk_tbl,      "risk_contributions.csv")
 # write_csv(stats_tbl,     "model_stats.csv")
+
+
+
+###Protfolio Edits###
+
+#Replace Ticker as needed
+tickers2 <- c("AAPL","AMZN","ARM","ASML","BA","BAC","BRK-B","BTF","BX","BYDDY","DB","DHIL",
+             "ELV","ESGV","FIG","HON","IWC","KR","LULU","MS","MSFT","NVDA","PG",
+             "PLTR","RIVN","RKT","RGTI","VNQ","VOO","VUG","WFC","WM","XLV", "SGOL","SPHY","TLT",
+             "UNH","XMPT")
+
+#Corrected shares as needed
+shares2 <- c(1.51, 1.4, 1.5, 0.0818, 0.290, 3.42, 0.1936, 3.85, 0.5282, 6, 6.42, 0.3832, 
+            0.4882, 2.53, 1, 0.1964, 1.04, 1.76, 0.3689, 1.83, 0.3928, 3.02, 0.8311, 
+            0.4710, 2, 2.12, 11.19, 1.56, 1.32, 1.29, 5.09, 0.34735, 0.8036, 2.87, 6.69, 1.93, 
+            0.2754, 7.01)
+
+stopifnot(length(tickers2) == length(shares2))
+holdings <- tibble(symbol = tickers2, shares = shares2)
+
+# ---------- download prices ----------
+start_date2 <- as.Date("2016-01-01")
+end_date2   <- Sys.Date()
+
+safe_get2 <- function(sym) {
+  tryCatch(
+    tq_get(sym, from = start_date, to = end_date, get = "stock.prices") |> mutate(symbol = sym),
+    error = function(e) tibble()
+  )
+}
+
+prices2 <- map_df(tickers, safe_get) |> distinct(symbol, date, .keep_all = TRUE)
+
+miss_syms2 <- setdiff(tickers, unique(prices$symbol))
+if (length(miss_syms)) message("No price history for: ", paste(miss_syms, collapse = ", "))
+
+# ---------- single common valuation date for weights ----------
+val_date2 <- prices |>
+  group_by(symbol) |>
+  summarise(last_date = max(date), .groups = "drop") |>
+  summarise(val_date = min(last_date)) |>
+  pull(val_date)
+
+weights_tbl2 <- prices |>
+  filter(date == val_date) |>
+  select(symbol, date, adjusted) |>
+  inner_join(holdings, by = "symbol") |>
+  mutate(position_value = adjusted * shares,
+         weight = position_value / sum(position_value)) |>
+  arrange(desc(weight)) |>
+  select(symbol, date, shares, price = adjusted, position_value, weight)
+
+# Pretty "as-of" weights table
+knitr::kable(
+  weights_tbl |>
+    mutate(position_value = dollar(position_value),
+           price = dollar(price),
+           weight = percent(weight, accuracy = 0.01)),
+  caption = paste0("As-of Weights on ", val_date)
+) |> kable_classic()
+
+# ---------- buy-and-hold portfolio value and monthly returns ----------
+port_val_daily2 <- prices2 |>
+  inner_join(holdings, by = "symbol") |>
+  mutate(pos_val = adjusted * shares) |>
+  group_by(date) |>
+  summarise(port_value = sum(pos_val, na.rm = TRUE), .groups = "drop") |>
+  arrange(date)
+
+# Monthly log returns of the portfolio value
+ret_m2 <- port_val_daily2 |>
+  tq_transmute(
+    select = port_value, mutate_fun = periodReturn,
+    period = "monthly", type = "log", col_rename = "port_ret"
+  )
+
+
+
+
+fpx <- map_df(factor_syms, safe_get) %>%
+  group_by(symbol) %>%
+  tq_transmute(select = adjusted, mutate_fun = periodReturn,
+               period = "monthly", type = "log", col_rename = "ret") %>%
+  pivot_wider(names_from = symbol, values_from = ret)
+
+
+
+# Align with portfolio
+df <- inner_join(ret_m, factors, by = "date") %>% drop_na()
+
+# -------------------- model: LASSO -> OLS --------------------
+X <- as.matrix(df %>% select(-date, -port_ret))
+y <- df$port_ret
+
+set.seed(42)
+cv  <- cv.glmnet(X, y, alpha = 1, nfolds = 10, standardize = TRUE)
+lam <- cv$lambda.1se  # parsimonious choice
+
+coef_sel <- coef(cv, s = lam)
+keep_idx <- which(coef_sel[-1,1] != 0)      # exclude intercept
+keep_factors <- colnames(X)[keep_idx]
+
+# Fallback: if nothing selected, keep Equity and Rates at least
+if(length(keep_factors) == 0) keep_factors <- c("EQ_Global","Rates")
+
+form <- reformulate(keep_factors, response = "port_ret")
+fit  <- lm(form, data = df)
+
+# -------------------- risk decomposition --------------------
+# Covariance of factor returns (monthly)
+Sigma <- cov(df[, keep_factors, drop = FALSE])
+
+b <- coef(fit)[keep_factors]                 # betas
+resid_var <- var(residuals(fit))
+fact_var  <- as.numeric(t(b) %*% Sigma %*% b)
+tot_var   <- fact_var + resid_var
+
+# Risk contributions per factor: b_i * (Σ b)_i
+rc_vec <- as.numeric(b * as.vector(Sigma %*% b))
+rc_tbl <- tibble(Factor = keep_factors,
+                 RiskContribution = rc_vec,
+                 PctOfTotalRisk = rc_vec / tot_var) %>%
+  arrange(desc(PctOfTotalRisk))
+
+# Exposures with t-stats
+tidy_fit <- broom::tidy(fit) %>%
+  filter(term != "(Intercept)") %>%
+  transmute(Factor = term, Beta = estimate, `t` = statistic) %>%
+  arrange(desc(abs(Beta)))
+
+# Model stats (annualized alpha & idio vol)
+alpha_m <- coef(fit)[["(Intercept)"]] %||% 0
+alpha_a <- (1 + alpha_m)^12 - 1
+idio_vol_a <- sqrt(resid_var) * sqrt(12)
+r2 <- summary(fit)$r.squared
+adjr2 <- summary(fit)$adj.r.squared
+
+stats_tbl <- tibble(
+  Metric = c("Annualized alpha","Idiosyncratic vol","R-squared","Adj. R-squared"),
+  Value  = c(scales::percent(alpha_a, accuracy = 0.01),
+             scales::percent(idio_vol_a, accuracy = 0.01),
+             scales::percent(r2, accuracy = 0.1),
+             scales::percent(adjr2, accuracy = 0.1))
+)
+
+# Pretty tables
+exposures_tbl <- tidy_fit %>%
+  mutate(Beta = round(Beta, 3), `t` = round(`t`, 2))
+
+risk_tbl <- rc_tbl %>%
+  mutate(PctOfTotalRisk = scales::percent(PctOfTotalRisk, accuracy = 0.1),
+         RiskContribution = round(RiskContribution, 6))
+
+
+
