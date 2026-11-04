@@ -1,6 +1,6 @@
 # Ven-Factor-Lens-Replicant
 
-Estimate your portfolio's factor exposures and risk decomposition using investable ETF proxies (a "Ven-Lens-style" approach), then print clean summary tables.
+Estimate your portfolio's factor exposures and risk decomposition using investable ETF proxies, then print clean summary tables. The idea was inspired by an interview with one of Venn (2 Sigma) heads of risk in portfolio construction.
 
 ---
 
